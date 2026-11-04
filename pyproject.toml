@@ -1,0 +1,115 @@
+[project]
+name = "vlm-training"
+version = "0.1.0"
+description = "Experiments and training of vision-language models (VLMs)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Branislav Hesko", email = "branislav@hesko.ai" }]
+keywords = ["vlm", "vision-language-model", "deep-learning", "pytorch", "transformers"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "transformers>=5.11",
+    "accelerate>=0.34",
+    "datasets>=3.0",
+    "pillow>=10.4",
+    "numpy>=2.0",
+    "pydantic>=2.9",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+train = [
+    "peft>=0.13",
+    "bitsandbytes>=0.44",
+    "wandb>=0.18",
+]
+
+[project.urls]
+Homepage = "https://github.com/branislavhesko/vlm_training"
+Repository = "https://github.com/branislavhesko/vlm_training"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "ipykernel>=6.29",
+    "pre-commit>=3.8",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "."]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",  # line length handled by formatter
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vlm_training"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -q --strict-markers --strict-config"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+branch = true
+source = ["vlm_training"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
