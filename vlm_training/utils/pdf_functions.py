@@ -20,7 +20,7 @@ def save_pdf_as_images(pdf_path):
 
 
 if __name__ == "__main__":
-    base_path = "/home/brani/code/vlm_training/dataset"
+    base_path = "/home/brani/code/vlm_training/dataset/eval"
     pdf_files = list(pathlib.Path(base_path).glob("*.pdf"))
     for i, pdf_file in enumerate(pdf_files):
         print(i, pdf_file)
