@@ -85,6 +85,13 @@ def parse_bboxes(response: str) -> list[dict]:
     return [_norm_detection(det) for det in _loads_tolerant(match.group(0))]
 
 
+def encode_boxes(boxes) -> str:
+    """Inverse of parse_bboxes: objects with x1, y1, x2, y2 (0-1000) and label
+    -> fenced JSON in the dataset's answer format."""
+    dets = [{"bbox_2d": [round(b.x1), round(b.y1), round(b.x2), round(b.y2)], "label": b.label} for b in boxes]
+    return "```json\n" + json.dumps(dets) + "\n```"
+
+
 def _color_for_label(label: str) -> tuple[int, int, int]:
     h = hashlib.md5(label.encode()).digest()
     return h[0] % 200 + 55, h[1] % 200 + 55, h[2] % 200 + 55

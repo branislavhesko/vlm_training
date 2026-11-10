@@ -12,7 +12,7 @@ Data: JSONL, one sample per line:
 
 Requires: pip install "transformers>=5.21.0" torch torchvision pillow
 """
-
+import abc
 import json
 import math
 import os
@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
+QWEN_BOX_NORMALIZATION_FACTOR = 1000
 
 # ----------------------------------------------------------------------------- config
 @dataclass
@@ -69,6 +69,125 @@ class Cfg:
 cfg = Cfg()
 
 
+def _clip01(v: float) -> float:
+    return min(1.0, max(0.0, v))
+
+
+@dataclass
+class Box:
+    """Axis-aligned box; augmentations assume coords normalized to 0-1."""
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    label: str = "product"
+    
+    def __post_init__(self):
+        if self.x1 > self.x2 or self.y1 > self.y2:
+            raise ValueError(f"Box coordinates must be valid: {self}")
+        
+    def jitter(self, max_jitter: float) -> "Box":
+        x1, x2 = (_clip01(v + random.uniform(-max_jitter, max_jitter)) for v in (self.x1, self.x2))
+        y1, y2 = (_clip01(v + random.uniform(-max_jitter, max_jitter)) for v in (self.y1, self.y2))
+        return Box(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2), self.label)
+        
+    def crop(self, start_x: float, start_y: float, end_x: float, end_y: float) -> "Box | None":
+        """Re-express the box in the normalized frame of the crop window
+        (window given in normalized coords of the current image). Returns None
+        if the box falls outside the window."""
+        w, h = end_x - start_x, end_y - start_y
+        x1 = _clip01((self.x1 - start_x) / w)
+        y1 = _clip01((self.y1 - start_y) / h)
+        x2 = _clip01((self.x2 - start_x) / w)
+        y2 = _clip01((self.y2 - start_y) / h)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return Box(x1, y1, x2, y2, self.label)
+    
+    def scale(self, scale_x: float, scale_y: float) -> "Box":
+        return Box(self.x1 * scale_x, self.y1 * scale_y, self.x2 * scale_x, self.y2 * scale_y, self.label)
+
+
+class Augmentation(abc.ABC):
+    @abc.abstractmethod
+    def __call__(self, image: Image.Image, boxes: list[Box]) -> tuple[Image.Image, list[Box]]:
+        pass
+
+
+class RandomCrop(Augmentation):
+    def __init__(self, p: float = 0.5, max_crop_ratio: float = 0.1):
+        self.p = p
+        self.max_crop_ratio = max_crop_ratio
+    
+    def __call__(self, image: Image.Image, boxes: list[Box]) -> tuple[Image.Image, list[Box]]:
+        if random.random() > self.p:
+            return image, boxes
+        
+        W, H = image.size
+        mx, my = int(W * self.max_crop_ratio), int(H * self.max_crop_ratio)
+        start_x = random.randint(0, mx)
+        start_y = random.randint(0, my)
+        end_x = random.randint(W - mx, W)
+        end_y = random.randint(H - my, H)
+        
+        image = image.crop((start_x, start_y, end_x, end_y))
+        
+        # window normalized by the ORIGINAL size; boxes get re-normalized to the crop
+        window = (start_x / W, start_y / H, end_x / W, end_y / H)
+        new_boxes = [b for b in (box.crop(*window) for box in boxes) if b is not None]
+        return image, new_boxes
+
+
+class RandomJitter(Augmentation):
+    def __init__(self, p: float = 0.5, max_jitter: float = 0.005):
+        self.p = p
+        self.max_jitter = max_jitter  # fraction of image size
+    
+    def __call__(self, image: Image.Image, boxes: list[Box]) -> tuple[Image.Image, list[Box]]:
+        if random.random() > self.p:
+            return image, boxes
+        return image, [box.jitter(self.max_jitter) for box in boxes]
+
+
+class RandomResize(Augmentation):
+    def __init__(self, p: float = 0.5, min_scale: float = 0.8, max_scale: float = 1.2, max_side: int | None = None):
+        self.p = p
+        self.min_scale = min_scale
+        self.max_scale = max_scale
+        self.max_side = max_side
+    
+    def __call__(self, image: Image.Image, boxes: list[Box]) -> tuple[Image.Image, list[Box]]:
+        if random.random() > self.p:
+            return image, boxes
+        
+        scale = random.uniform(self.min_scale, self.max_scale)
+        if self.max_side:
+            scale = min(scale, self.max_side / max(image.size))
+        new_size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        # uniform resize: normalized box coords are unchanged
+        return image.resize(new_size, Image.Resampling.BICUBIC), boxes
+
+    
+class Compose(Augmentation):
+    def __init__(self, augmentations: list[Augmentation]):
+        self.augmentations = augmentations
+    
+    def _boxes_to_normalized(self, boxes: list[Box]) -> list[Box]:
+        return [box.scale(1 / QWEN_BOX_NORMALIZATION_FACTOR, 1 / QWEN_BOX_NORMALIZATION_FACTOR) for box in boxes]
+    
+    def _boxes_to_original(self, boxes: list[Box]) -> list[Box]:
+        return [box.scale(QWEN_BOX_NORMALIZATION_FACTOR, QWEN_BOX_NORMALIZATION_FACTOR) for box in boxes]
+    
+    def __call__(self, image: Image.Image, boxes: list[Box]) -> tuple[Image.Image, list[Box]]:
+        boxes = self._boxes_to_normalized(boxes)
+        for augmentation in self.augmentations:
+            image, boxes = augmentation(image, boxes)
+            
+        boxes = self._boxes_to_original(boxes)
+        return image, boxes
+
+
+
 # ----------------------------------------------------------------------------- data
 def _synth_think(answer: str) -> str:
     """Short reasoning trace describing the GT layout, so the model learns to
@@ -95,21 +214,45 @@ def _synth_think(answer: str) -> str:
 
 
 class JsonlVLDataset(Dataset):
-    def __init__(self, path, max_side, inject_think=False):
+    def __init__(self, path, max_side, inject_think=False, augment=False):
         with open(path) as f:
             self.rows = [json.loads(l) for l in f if l.strip()]
         self.max_side = max_side
         self.inject_think = inject_think
+        self.augmentations = Compose([
+            RandomCrop(p=0.5, max_crop_ratio=0.1),
+            RandomResize(p=0.5, min_scale=0.8, max_scale=1.2, max_side=max_side),
+            RandomJitter(p=0.5, max_jitter=0.02),
+        ]) if augment else None
 
     def __len__(self):
         return len(self.rows)
+    
+    def _parse_boxes(self, answer: str) -> list[Box]:
+        from vlm_training.utils.bbox_viz import parse_bboxes
+        try:
+            boxes = parse_bboxes(answer)
+        except (ValueError, KeyError):
+            return []
+        return [Box(*b["bbox_2d"], label=b["label"]) for b in boxes]
+    
+    def _encode_boxes(self, boxes: list[Box]) -> str:
+        from vlm_training.utils.bbox_viz import encode_boxes
+        return encode_boxes(boxes)
 
     def __getitem__(self, i):
         r = self.rows[i]
         img = Image.open(r["images"][0]).convert("RGB")
         img.thumbnail((self.max_side, self.max_side))  # keeps aspect ratio, only downsizes
         answer = r["conversations"][1]["value"]
-        if self.inject_think and "<think>" not in answer:
+        
+        if self.augmentations:
+            boxes = self._parse_boxes(answer)
+            img, boxes = self.augmentations(img, boxes)
+            # rebuild the target from the augmented boxes (drop any stale GT think trace)
+            answer = self._encode_boxes(boxes)
+        
+        if self.inject_think and "</think>" not in answer:
             answer = _synth_think(answer) + answer
         # Don't put <image> tags in text: the chat template inserts the vision tokens.
         return [
@@ -307,7 +450,7 @@ def main(c: Cfg):
     model.train()
 
     collate = Collator(processor, c.max_len)
-    train_ds = JsonlVLDataset(c.train_jsonl, c.max_image_side, c.inject_think)
+    train_ds = JsonlVLDataset(c.train_jsonl, c.max_image_side, c.inject_think, augment=True)
     val_ds = JsonlVLDataset(c.val_jsonl, c.max_image_side, c.inject_think)
     train_dl = DataLoader(train_ds, c.batch_size, shuffle=True, collate_fn=collate,
                           num_workers=c.num_workers, pin_memory=True, drop_last=True,
